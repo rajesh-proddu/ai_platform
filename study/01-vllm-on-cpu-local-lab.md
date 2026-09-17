@@ -75,7 +75,7 @@ Observed:
 - The model download (0.92 GiB) took about 214 s without an HF token.
 - `/health` returned OK after about **7.5 minutes** (image start, download, then loading the weights).
 - The container's memory use was **5.39 GiB of 7.48 GiB** right after startup and about 4.5 GiB later. The model itself is under 1 GiB; the rest is vLLM runtime overhead plus the reserved KV cache.
-- **Not yet verified:** an actual chat completion, and the contents of `/metrics`.
+- Chat completions and `/metrics` were tested afterwards; see [Benchmark](#benchmark-bf16-vs-float32) below.
 
 Try it:
 ```bash
@@ -84,6 +84,56 @@ curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 curl -s localhost:8000/metrics | grep -E 'vllm:(num_requests|kv_cache|time_to_first_token)' | head
 docker stop vllm-cpu      # restarts are faster now: the weights are cached in ~/.cache/huggingface
 ```
+
+### Benchmark: bf16 vs float32
+
+Tested 2026-09-17: Qwen2.5-0.5B-Instruct, `temperature=0`, all numbers read from `/metrics` before and after each request.
+
+The float32 container was started with the privileges vLLM's CPU docs recommend.
+Those privileges removed the `numa_migrate_pages` / `numa_set_membind` "permission denied" warnings (errno 1) that appeared in the bf16 run.
+```bash
+docker run -d --name vllm-cpu -p 8000:8000 --shm-size=4g \
+  --cap-add SYS_NICE --security-opt seccomp=unconfined \
+  -e VLLM_CPU_KVCACHE_SPACE=1 \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  vllm/vllm-openai-cpu:latest-x86_64 \
+  Qwen/Qwen2.5-0.5B-Instruct --dtype float32 --max-model-len 4096
+```
+`--dtype float64` isn't accepted. The options are `auto`, `bfloat16`, `float`/`float32`, `float16` and `half`.
+
+| Measurement | bf16 (no extra privileges) | float32 (+ `SYS_NICE`, `seccomp=unconfined`) |
+|---|---|---|
+| Time until `/health` passes | ~442 s (includes the model download) | ~268 s (model already cached) |
+| First request after start (warm-up / compile) | TTFT ~110 s | TTFT ~107 s |
+| Short request, 35 tokens in: TTFT | ~6.0 s | **1.1 s** |
+| Time per generated token (ITL) | ~1.3–1.5 s (~0.7 tok/s) | ~1.05–1.12 s (~0.9–1.0 tok/s) |
+| 64-token answer, end to end | — | 71.7 s |
+| 460-token prompt, nothing cached: TTFT | 3.0 s | 2.4 s |
+| Same system prompt, second request: TTFT | 1.8 s (384/459 tokens cached) | 1.35 s (384/459 tokens cached) |
+| Container memory after start | 5.39 GiB | 5.27 GiB |
+
+What this shows:
+- **float32 plus the privileges made prompt processing much faster** (short-prompt TTFT dropped from 6 s to 1.1 s).
+  **Token generation barely improved** (about 25%), and it is still about 1 s per token.
+- **Generation isn't slowed by the model's actual maths.** The model reads 460 prompt tokens in about 2.4 s, so producing one token should take a small fraction of a second.
+  The time is probably going to overhead on each generation step. Neither bf16 nor the missing privileges was the main cause.
+  Still to try:
+  - `--enforce-eager` (rules out the compiled path);
+  - `VLLM_CPU_OMP_THREADS_BIND` set to fewer cores, or `nobind` (the Core Ultra 5 225H mixes core types, and threads that run in lockstep wait for the slowest one);
+  - an explicit `OMP_NUM_THREADS`.
+
+  vLLM logs "Reducing Torch threads from 14 to 1 for serving", which is worth investigating.
+- **The prefix cache works in whole 128-token blocks** (`block_size=128`): 384 = 3 × 128.
+  The final partial block is never reused, so short prompts get no cache hits. Reusing the cache cut TTFT by about 40–45%.
+- **The first request after every container start costs about 110 s** for compilation.
+  The compile cache lives at `/root/.cache/vllm` inside the container. Mounting it (`-v ~/.cache/vllm:/root/.cache/vllm`) should avoid repeating that work on restarts (not yet tested).
+- **Sampling defaults come from the model**, not vLLM.
+  Qwen's `generation_config.json` sets `temperature 0.7, top_k 20, top_p 0.8, repetition_penalty 1.1` for requests that don't specify them. Use `--generation-config vllm` to get vLLM's own defaults.
+- `vllm:cache_config_info` shows how the cache is set up: `enable_prefix_caching=True`, `block_size=128`, `kv_cache_memory_bytes=1073741824` (1 GiB), 682 blocks.
+
+Metrics used above, all present in v0.29.0:
+`time_to_first_token_seconds`, `inter_token_latency_seconds`, `request_prefill_time_seconds`, `request_decode_time_seconds`, `request_queue_time_seconds`,
+`prefix_cache_hits_total` / `prefix_cache_queries_total`, `prompt_tokens_cached_total`, `num_requests_running` / `num_requests_waiting`, `kv_cache_usage_perc`, `num_preemptions_total`.
 
 ### Hugging Face token
 
