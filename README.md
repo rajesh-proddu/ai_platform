@@ -81,7 +81,10 @@ make run-registry          # :8091/healthz
 cp deploy/local/.env.example deploy/local/.env
 make up
 curl localhost:15021       # gateway readiness
-curl localhost:3000/v1/models
+
+# The guardrail hook is failClosed, so /v1/* rejects traffic until the ai_security inspection
+# service is running — enable it in deploy/local/docker-compose.yml, or flip both failureModes
+# to failOpen in gateway/config.yaml for gateway-only work.
 
 # Gateway config, validated against the pinned agentgateway schema
 make gateway-validate      # needs python3 with jsonschema + pyyaml
