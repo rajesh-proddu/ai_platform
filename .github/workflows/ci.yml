@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25"
+  AGENTGATEWAY_VERSION: v1.5.0
+
+jobs:
+  go:
+    name: build · vet · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "unformatted files:"; echo "$out"; exit 1; fi
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          # Pinned: the v2 config format in .golangci.yml is not readable by v1.
+          version: v2.13.2
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  gateway-config:
+    name: gateway config schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install --no-cache-dir jsonschema pyyaml
+      - name: Validate gateway/config.yaml against the pinned agentgateway schema
+        run: |
+          curl -sSL -o /tmp/agentgateway-schema.json \
+            "https://raw.githubusercontent.com/agentgateway/agentgateway/${AGENTGATEWAY_VERSION}/schema/config.json"
+          python - <<'PY'
+          import json, yaml, jsonschema
+          schema = json.load(open("/tmp/agentgateway-schema.json"))
+          doc = yaml.safe_load(open("gateway/config.yaml"))
+          jsonschema.Draft202012Validator(schema).validate(doc)
+          print("gateway/config.yaml is valid")
+          PY

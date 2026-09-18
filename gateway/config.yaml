@@ -1,0 +1,165 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+#
+# agentgateway local ("standalone") configuration for the P0 gateway plane.
+# Written against the agentgateway v1.5.0 config schema (released 2026-08-27, checked 2026-09-18).
+# See gateway/README.md for what is verified and what is still a TODO.
+#
+# Serves, on one gateway (port 3000):
+#   • LLM   — OpenAI-compatible API (/v1/models, /v1/chat/completions, ...)   HLD §5.1
+#   • MCP   — /mcp and /sse, multiplexing the configured MCP targets
+# Both routes call the ai_security inspection service over ext_proc.          ai_security DESIGN §3.2
+
+config:
+  # Bound to 0.0.0.0 so the container's readiness/metrics endpoints are reachable from the host.
+  # agentgateway's own examples bind these to 127.0.0.1; that does not work inside a container.
+  readinessAddr: 0.0.0.0:15021
+  statsAddr: 0.0.0.0:15020
+
+gateways:
+  default:
+    port: 3000
+
+# ---------------------------------------------------------------------------
+# LLM plane — HLD §5
+# ---------------------------------------------------------------------------
+llm:
+  gateways: default
+
+  policies:
+    # Guardrail hook (c): ai_security inspection service, ext_proc gRPC.
+    # Attached at `llm.policies` so it runs before a model is selected — i.e. it sees the
+    # caller-facing OpenAI Chat Completions payload, which is the format ai_security parses first.
+    #
+    # failureMode is set explicitly (the schema default is failClosed, but ai_security DESIGN §3.2
+    # requires this to match its policy default, so it is never left implicit here).
+    extProc:
+      host: ai-security-inspector:9000
+      failureMode: failClosed
+      processingOptions:
+        requestHeaderMode: send
+        responseHeaderMode: send
+        # fullDuplexStreamed keeps SSE token streams inspectable without buffering the
+        # whole response — required for ai_security's streaming window redaction (DESIGN §3.5).
+        requestBodyMode: fullDuplexStreamed
+        responseBodyMode: fullDuplexStreamed
+
+    # --- Alternative guardrail hook: webhook prompt guard --------------------
+    # ai_security supports either ext_proc or the simpler webhook prompt guard. The webhook form
+    # is left commented out because only one should be active at a time; it inspects the
+    # LLM payload only (no MCP coverage) and cannot mutate the body mid-stream.
+    #
+    # guardrails:
+    #   streaming: Enabled
+    #   request:
+    #   - webhook:
+    #       target:
+    #         host: ai-security-inspector:8080
+    #       failureMode: failClosed
+    #     scope: [systemPrompt, messages, toolInput, toolOutput]
+    #   response:
+    #   - webhook:
+    #       target:
+    #         host: ai-security-inspector:8080
+    #       failureMode: failClosed
+
+  providers:
+    # Dev / e2e backend: local vLLM, CPU-only, OpenAI-compatible server (study/01).
+    # vLLM ignores the key, but agentgateway's openAI provider expects one, so a dummy is supplied.
+    - name: vllm-local
+      provider: openAI
+      params:
+        baseUrl: http://vllm:8000
+        apiKey: $VLLM_API_KEY
+
+    # Prod backend, declared but not exercised locally. Credentials come from the ambient AWS
+    # credential chain (IRSA on EKS) — never checked in.
+    # The region is a literal: `$VAR` expansion is only confirmed for `apiKey` (see gateway/README.md).
+    - name: bedrock-prod
+      provider: bedrock
+      params:
+        awsRegion: us-east-1
+
+  models:
+    # `name` is what the caller asks for; `params.model` is what is sent upstream. That indirection
+    # is the model-alias contract of HLD §5.5, applied at the model level.
+    #
+    # The vLLM model id must match the argument vLLM was launched with
+    # (see deploy/local/docker-compose.yml).
+    - name: local/qwen2.5-0.5b-instruct
+      provider:
+        reference: vllm-local
+      params:
+        model: Qwen/Qwen2.5-0.5B-Instruct
+
+    - name: bedrock/claude-haiku
+      provider:
+        reference: bedrock-prod
+      params:
+        model: anthropic.claude-3-5-haiku-20241022-v1:0
+
+  virtualModels:
+    # `chat-default` is the caller-facing alias (HLD §5.5) and the fallback chain of HLD §5.3(4):
+    # local vLLM first, Bedrock as the lower-priority group.
+    #
+    # NOTE: both concrete models above are left at the default `visibility: public`, so callers may
+    # still address them directly. P1 should set `visibility: internal` once the alias is the
+    # enforced contract — that is a policy decision, not a scaffold one.
+    - name: chat-default
+      routing:
+        failover:
+          targets:
+            - model: local/qwen2.5-0.5b-instruct
+              priority: 0
+            - model: bedrock/claude-haiku
+              priority: 1
+
+# ---------------------------------------------------------------------------
+# MCP plane — sample MCP server, served at /mcp on the same gateway
+# ---------------------------------------------------------------------------
+mcp:
+  gateways: default
+
+  policies:
+    # Same inspection service, so tool calls and tool results are inspected too — the surfaces
+    # LiteLLM's guardrail API cannot cover (ai_security DESIGN §3.2).
+    extProc:
+      host: ai-security-inspector:9000
+      failureMode: failClosed
+      processingOptions:
+        requestHeaderMode: send
+        responseHeaderMode: send
+        requestBodyMode: fullDuplexStreamed
+        responseBodyMode: fullDuplexStreamed
+
+  targets:
+    # Reference MCP server used by the ai_security e2e suite until an MCP-based agent exists.
+    # Streamable HTTP rather than stdio: the agentgateway container image is distroless and has no
+    # node/npx, so a stdio target cannot spawn the server. It runs as its own compose service.
+    - name: everything
+      mcp:
+        host: mcp-everything
+        port: 3001
+        path: /mcp
+
+    # stdio alternative, for running the agentgateway binary directly on the host:
+    # - name: everything
+    #   stdio:
+    #     cmd: npx
+    #     args: ["-y", "@modelcontextprotocol/server-everything"]
+
+# ---------------------------------------------------------------------------
+# Not configured in P0 — recorded here so the gaps are explicit, not implied.
+# ---------------------------------------------------------------------------
+# TODO(P0/P1): exact-match response cache (HLD §8). agentgateway v1.5.0 has no cache policy in its
+#   route/LLM policy set; the Redis container in deploy/local is provisioned for it and for the P1
+#   session scope. Re-check:
+#   https://agentgateway.dev/docs/standalone/latest/reference/configuration/
+# TODO(P0): token-aware admission — TPM + per-key budgets (HLD §5.4). The schema exposes
+#   `llm.policies.localRateLimit` / `remoteRateLimit` and spend controls; the exact token-aware
+#   shape was not verified for v1.5.0. See:
+#   https://agentgateway.dev/docs/standalone/latest/configuration/resiliency/rate-limits/
+# TODO(P0): JWT auth against the platform's shared HS256 secret (HLD §5.2). `llm.policies.jwtAuth`
+#   exists (LocalJwtConfig); issuer/JWKS wiring for an HS256 secret was not verified. See:
+#   https://agentgateway.dev/docs/standalone/latest/configuration/
+# TODO(P1): OTel export of gen_ai.* spans to the existing Jaeger/Prometheus stack (HLD §11);
+#   `config.tracing` / `config.metrics` exist in the schema but were not verified.
