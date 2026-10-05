@@ -27,9 +27,16 @@ print('ok')
 PY
 ```
 
-Schema validation proves **shape**, not behaviour. The stack has **not** been run end to end here —
-the dev box is CPU-only WSL2 with ~7.5 GiB and vLLM needs ~7.5 min to become healthy (see
-[`study/01`](../study/01-vllm-on-cpu-local-lab.md)). Nothing below should be read as "tested live".
+Schema validation proves **shape**, not behaviour. The full stack (with vLLM) has **not** been run end to
+end here — the dev box is CPU-only WSL2 with ~7.5 GiB and vLLM needs ~7.5 min to become healthy (see
+[`study/01`](../study/01-vllm-on-cpu-local-lab.md)).
+
+**Run live, 2026-09-29/30:** the `ai_security` Phase 1 spike
+([`docs/spikes/agentgateway-extproc.md`](https://github.com/rajesh-proddu/ai_security/blob/phase-0-scaffold/docs/spikes/agentgateway-extproc.md))
+ran the agentgateway v1.5.0 release binary on this config, with only hostnames changed, against a fake
+OpenAI-compatible backend and `@modelcontextprotocol/server-everything`. The guardrail hooks,
+`failureMode` and body modes below are therefore **observed**, not just schema-checked. The config as
+committed also starts cleanly on that binary.
 
 ## Contract with `ai_security`
 
@@ -40,15 +47,21 @@ the dev box is CPU-only WSL2 with ~7.5 GiB and vLLM needs ~7.5 min to become hea
 | Gateway HTTP | `:3000` | LLM under `/v1/*`, MCP under `/mcp` and `/sse` |
 | Gateway readiness | `:15021` | `config.readinessAddr` |
 | Gateway metrics | `:15020` | `config.statsAddr` |
-| Inspection service, ext_proc | `ai-security-inspector:9000` (gRPC) | Envoy `ext_proc` protocol |
+| Inspection service, gRPC | `ai-security-inspector:9000` | LLM route: Envoy `ext_proc`. MCP route: agentgateway `ExtMcp` (`mcpGuardrails`). One listener serves both. |
 | Inspection service, webhook | `ai-security-inspector:8080` (HTTP) | only if the webhook guard is used instead |
 | Caller-facing model alias | `chat-default` | virtual model; failover vLLM → Bedrock |
 | Local vLLM | `vllm:8000`, model `Qwen/Qwen2.5-0.5B-Instruct` | |
-| `failureMode` | `failClosed` on both routes | must match ai_security's policy default |
+| `failureMode` | `failClosed` on both hooks | must match ai_security's policy default |
+| Session key | `x-session-id` request header | read by ext_proc from headers; passed to ExtMcp as `metadata.session` |
 
-Only **one** guardrail hook should be active at a time. `ext_proc` is the default because it is the
-only one that also covers the MCP route (tool calls and tool results); the webhook prompt-guard
-variant is present but commented out in `config.yaml`.
+On the LLM route only **one** guardrail hook should be active at a time: `ext_proc` is the default, and the
+webhook prompt-guard variant is present but commented out in `config.yaml`. The MCP route uses
+`mcpGuardrails` rather than `ext_proc`, because raw `ext_proc` there sees SSE-framed JSON-RPC and replies
+that don't name their method; ExtMcp passes the method, `params` and `result` as JSON.
+
+`failOpen` is **not** a way to run without the inspector: with `fullDuplexStreamed`, the LLM hook fails every
+request that has a body even when set to `failOpen` (observed). For gateway-only work, remove the two hook
+blocks instead.
 
 ## What is verified, and how
 
@@ -74,17 +87,15 @@ Fields below appear verbatim in agentgateway's own `examples/` at tag `v1.5.0` o
 These are valid per the `v1.5.0` `LocalConfig` schema and the config validates, but agentgateway's
 published examples do not demonstrate them. Treat as "should work", confirm in the Phase 1 spike:
 
-- **`llm.policies.extProc`** and **`mcp.policies.extProc`.** The fields exist (`LocalLLMPolicy.extProc`,
-  and `mcp.policies` is a `FilterOrPolicy` which carries `extProc`), and `llm.policies` is documented
-  as "policies for handling incoming requests, before a model is selected" — which is exactly the
-  placement ai_security wants. **Every** official ext_proc example is route-level
-  (`routes[].policies.extProc`), so if the LLM/MCP placement misbehaves, move the hook to an explicit
-  `routes[]` entry; the policy body is unchanged.
+- ~~**`llm.policies.extProc`** and **`mcp.policies.extProc`**~~ — now **observed** (see "Run live" above).
+  `llm.policies.extProc` sees the caller-facing request (`model: chat-default`) before alias resolution.
+  `mcp.policies.extProc` was replaced by **`mcp.policies.mcpGuardrails`** (`kind: remote`), also observed:
+  pass, mutate and reject on `tools/list` and `tools/call`, and `metadata` CEL values delivered on both phases.
 - **`llm.virtualModels[].routing.failover`** with `targets[].{model,priority}`
   (`LocalLLMFailoverRouting` / `LocalLLMFailoverTarget`). The only published virtual-model example uses
   `weighted`.
-- **`processingOptions.*BodyMode: fullDuplexStreamed`** — the schema default; not shown in the
-  doc examples, which use `bufferedPartial` / `none`.
+- ~~**`processingOptions.*BodyMode: fullDuplexStreamed`**~~ — now **observed**. The inspector must send
+  every body chunk back as a streamed body mutation; a reply without one empties the body.
 - The commented-out **webhook prompt guard** block (`llm.policies.guardrails.request[].webhook`,
   `PromptGuard` / `RequestGuard` / `Webhook` / `WebhookFailureMode`, `scope: ContentScope`).
   The published prompt-guard example uses the deprecated `binds:` layout and a `regex` guard.
@@ -100,7 +111,7 @@ Guessing schema here would be worse than an honest gap, so these are `TODO:` com
 | Token-aware admission: TPM + per-key budgets | §5.4 | `llm.policies.localRateLimit` / `remoteRateLimit` exist; token-aware shape unverified. <https://agentgateway.dev/docs/standalone/latest/configuration/resiliency/rate-limits/> |
 | JWT auth against the platform's shared HS256 secret | §5.2 | `llm.policies.jwtAuth` (`LocalJwtConfig`) exists; HS256-secret wiring unverified. <https://agentgateway.dev/docs/standalone/latest/configuration/> |
 | OTel `gen_ai.*` export to Jaeger/Prometheus | §11 | `config.tracing` / `config.metrics` exist; unverified. |
-| Env-var expansion outside `apiKey` | — | Only `apiKey: $VAR` is demonstrated. `awsRegion` and `params.model` are therefore literals. |
+| Env-var expansion outside `apiKey` | — | Only `apiKey: $VAR` is demonstrated. `awsRegion` and `params.model` are therefore literals. **Observed:** expansion runs over the raw file, **comments included** — a dollar-prefixed name in a comment stops startup when that variable is unset. |
 
 Also **not** verified, and a named selection criterion in HLD §5.3: whether agentgateway suppresses
 retries once the first token has been flushed. `RetryPolicy` has a `precondition` CEL expression that

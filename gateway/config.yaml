@@ -7,7 +7,8 @@
 # Serves, on one gateway (port 3000):
 #   • LLM   — OpenAI-compatible API (/v1/models, /v1/chat/completions, ...)   HLD §5.1
 #   • MCP   — /mcp and /sse, multiplexing the configured MCP targets
-# Both routes call the ai_security inspection service over ext_proc.          ai_security DESIGN §3.2
+# Both call the ai_security inspection service: LLM over ext_proc, MCP over    ai_security DESIGN §3.2
+# mcpGuardrails (agentgateway's ExtMcp). Both hooks share the inspector's :9000 gRPC listener.
 
 config:
   # Bound to 0.0.0.0 so the container's readiness/metrics endpoints are reachable from the host.
@@ -73,7 +74,9 @@ llm:
 
     # Prod backend, declared but not exercised locally. Credentials come from the ambient AWS
     # credential chain (IRSA on EKS) — never checked in.
-    # The region is a literal: `$VAR` expansion is only confirmed for `apiKey` (see gateway/README.md).
+    # The region is a literal: env-var expansion is only confirmed for `apiKey` (see gateway/README.md).
+    # Never write a dollar-prefixed name anywhere in this file, comments included: agentgateway expands
+    # them across the raw file and refuses to start when the variable is unset.
     - name: bedrock-prod
       provider: bedrock
       params:
@@ -120,16 +123,24 @@ mcp:
   gateways: default
 
   policies:
-    # Same inspection service, so tool calls and tool results are inspected too — the surfaces
-    # LiteLLM's guardrail API cannot cover (ai_security DESIGN §3.2).
-    extProc:
-      host: ai-security-inspector:9000
-      failureMode: failClosed
-      processingOptions:
-        requestHeaderMode: send
-        responseHeaderMode: send
-        requestBodyMode: fullDuplexStreamed
-        responseBodyMode: fullDuplexStreamed
+    # Same inspection service, so tool definitions, tool calls and tool results are inspected too — the
+    # surfaces LiteLLM's guardrail API cannot cover (ai_security DESIGN §3.2).
+    #
+    # mcpGuardrails rather than extProc: agentgateway's ExtMcp protocol hands the inspector the MCP method,
+    # params and result as JSON. Raw extProc on this route sees SSE-framed JSON-RPC and replies that don't
+    # name their method (ai_security docs/spikes/agentgateway-extproc.md).
+    # `metadata.session` passes the agent's x-session-id on both hooks; ExtMcp responses carry no headers,
+    # and the gateway's own mcp-session-id is unrelated to the agent's session (ai_security DESIGN §6 #2).
+    # The gateway warns at startup that resources/subscribe, resources/unsubscribe and completion/complete
+    # only run the response phase under `"*": full`; that is expected.
+    mcpGuardrails:
+      processors:
+        - kind: remote
+          methods: { "*": full }
+          host: ai-security-inspector:9000
+          failureMode: failClosed
+          metadata:
+            session: 'request.headers["x-session-id"]'
 
   targets:
     # Reference MCP server used by the ai_security e2e suite until an MCP-based agent exists.

@@ -62,7 +62,7 @@ enforced. Retire is a state, never a delete: retired versions stay resolvable fo
 | vLLM | 8000 | dev + e2e model backend |
 | Redis | 6379 | P1 session scope and response cache |
 | sample MCP server | 3001 | behind the gateway's MCP route |
-| ai_security inspection service | 9000 (ext_proc gRPC), 8080 (webhook) | separate repo; optional in the compose file |
+| ai_security inspection service | 9000 (gRPC: ext_proc for LLM, ExtMcp for MCP), 8080 (webhook) | separate repo; optional in the compose file |
 | stateservice | 8090 | `STATE_HTTP_ADDR` |
 | registry | 8091 | `REGISTRY_HTTP_ADDR` |
 
