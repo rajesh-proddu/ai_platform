@@ -131,6 +131,10 @@ mcp:
     # name their method (ai_security docs/spikes/agentgateway-extproc.md).
     # `metadata.session` passes the agent's x-session-id on both hooks; ExtMcp responses carry no headers,
     # and the gateway's own mcp-session-id is unrelated to the agent's session (ai_security DESIGN §6 #2).
+    # `metadata.mcp_session` is the fallback for agents that send no x-session-id: without it, their tool
+    # calls are checked under mcp-session-id while tool lists and results are recorded under no session, so
+    # blocked tools and taint are never enforced (observed live, ai_security 51b2fbd). A missing header
+    # yields an empty value, not an error.
     # The gateway warns at startup that resources/subscribe, resources/unsubscribe and completion/complete
     # only run the response phase under `"*": full`; that is expected.
     mcpGuardrails:
@@ -141,6 +145,7 @@ mcp:
           failureMode: failClosed
           metadata:
             session: 'request.headers["x-session-id"]'
+            mcp_session: 'request.headers["mcp-session-id"]'
 
   targets:
     # Reference MCP server used by the ai_security e2e suite until an MCP-based agent exists.

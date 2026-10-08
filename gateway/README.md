@@ -52,7 +52,7 @@ committed also starts cleanly on that binary.
 | Caller-facing model alias | `chat-default` | virtual model; failover vLLM → Bedrock |
 | Local vLLM | `vllm:8000`, model `Qwen/Qwen2.5-0.5B-Instruct` | |
 | `failureMode` | `failClosed` on both hooks | must match ai_security's policy default |
-| Session key | `x-session-id` request header | read by ext_proc from headers; passed to ExtMcp as `metadata.session` |
+| Session key | `x-session-id` request header, then `mcp-session-id` | read by ext_proc from headers; passed to ExtMcp as `metadata.session` and `metadata.mcp_session` (ExtMcp responses carry no headers) |
 
 On the LLM route only **one** guardrail hook should be active at a time: `ext_proc` is the default, and the
 webhook prompt-guard variant is present but commented out in `config.yaml`. The MCP route uses

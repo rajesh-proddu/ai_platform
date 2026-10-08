@@ -104,8 +104,7 @@ services:
   #   environment:
   #     ADDR: ":8080"               # HTTP: /healthz, webhook guard, plain HTTP adapter
   #     REDIS_ADDR: "redis:6379"    # host:port, not a URL
-  #     # The :9000 gRPC listener (ext_proc + ExtMcp) arrives with ai_security's Phase 1 adapter;
-  #     # its env var is named there.
+  #     GRPC_ADDR: ":9000"          # gRPC: ext_proc (LLM route) + ExtMcp (MCP route)
   #   expose:
   #     - "9000"
   #     - "8080"
