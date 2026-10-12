@@ -1,0 +1,18 @@
+# Build output
+/bin/
+/dist/
+/out/
+
+# Go
+*.test
+*.out
+coverage.*
+
+# Local environment — may contain credentials; only .env.example is committed
+.env
+deploy/local/.env
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/

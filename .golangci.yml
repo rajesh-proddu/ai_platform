@@ -1,0 +1,19 @@
+# golangci-lint v2 configuration. Pinned in .github/workflows/ci.yml — v1 and v2 config formats
+# are not compatible, so do not let the linter version float.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+formatters:
+  enable:
+    - gofmt

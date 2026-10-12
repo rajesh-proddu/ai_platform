@@ -1,0 +1,13 @@
+.git
+.github
+.golangci.yml
+Makefile
+README.md
+AI-INFERENCE-PLATFORM-HLD.md
+study
+gateway
+deploy
+bin
+dist
+out
+*.md
