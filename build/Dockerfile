@@ -1,6 +1,6 @@
 # One Dockerfile for both P0 services; pick with --build-arg SERVICE=stateservice|registry.
 #   docker build -f build/Dockerfile --build-arg SERVICE=stateservice -t ai-platform/stateservice:dev .
-ARG GO_VERSION=1.25
+ARG GO_VERSION=1.26
 
 FROM golang:${GO_VERSION}-alpine AS build
 ARG SERVICE
